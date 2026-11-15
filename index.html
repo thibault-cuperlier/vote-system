@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="fr"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Pi Macro</title>
+<style>
+:root{--bg:#0f1220;--card:#181c30;--in:#232846;--txt:#e8eaf6;--mut:#8a90b4;--acc:#6c8cff;--ok:#3ddc97;--ko:#ff5d73}
+*{box-sizing:border-box}body{margin:0;font-family:system-ui,sans-serif;background:var(--bg);color:var(--txt);padding:16px;max-width:1100px;margin:auto}
+h1{margin:0 0 12px;display:flex;align-items:center;gap:10px;flex-wrap:wrap}.dot{width:12px;height:12px;border-radius:50%;background:var(--ko)}.dot.on{background:var(--ok)}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:10px;margin-bottom:12px}
+.card{background:var(--card);border-radius:14px;padding:14px;margin-bottom:12px}.grid .card{margin:0}
+.lbl{color:var(--mut);font-size:.75rem;text-transform:uppercase}.big{font-size:1.9rem;font-weight:700;margin-top:4px}
+button,input,select{font:inherit;border:0;border-radius:8px;padding:9px 13px}button{background:var(--acc);color:#fff;cursor:pointer}
+button.ko{background:var(--ko)}button.gr{background:#2a3050}input,select{background:var(--in);color:var(--txt)}input[type=number]{width:90px}
+.row{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-top:10px}.mut{color:var(--mut);font-size:.8rem}
+#login{max-width:340px;margin:12vh auto}#login input{width:100%;margin-bottom:10px}
+.gal{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:10px;margin-top:10px}.gal img{width:100%;border-radius:10px;display:block}
+pre{background:#0a0d1a;padding:8px;border-radius:8px;overflow:auto;max-height:200px;margin:4px 0 0;white-space:pre-wrap;font-size:.8rem}
+.cmd{padding:8px 0;border-bottom:1px solid #2a3050}.st-done{color:var(--ok)}.st-error{color:var(--ko)}.st-pending,.st-running{color:#ffc857}
+#cmdline{flex:1;min-width:200px;font-family:ui-monospace,monospace}
+</style></head><body>
+
+<div id="login" class="card">
+  <h1>Pi Macro</h1>
+  <input id="em" type="email" placeholder="Email" autocomplete="username">
+  <input id="pw" type="password" placeholder="Mot de passe" autocomplete="current-password" onkeydown="if(event.key==='Enter')login()">
+  <button onclick="login()" style="width:100%">Se connecter</button>
+  <div id="lerr" class="mut" style="color:var(--ko);margin-top:8px"></div>
+</div>
+
+<div id="app" hidden>
+  <h1><span class="dot" id="dot"></span>Pi Macro <span class="mut" id="host"></span>
+    <button class="gr" style="margin-left:auto" onclick="logout()">Déconnexion</button></h1>
+
+  <div class="grid">
+    <div class="card"><div class="lbl">Statut</div><div class="big" id="status">-</div></div>
+    <div class="card"><div class="lbl">Exécutions</div><div class="big" id="runs">0</div></div>
+    <div class="card"><div class="lbl">Prochaine dans</div><div class="big" id="next">-</div></div>
+    <div class="card"><div class="lbl">Dernière</div><div class="big" id="last" style="font-size:1.1rem">-</div></div>
+    <div class="card"><div class="lbl">Pi</div><div id="pi" class="mut" style="margin-top:6px">-</div></div>
+  </div>
+
+  <div class="card">
+    <div class="row" style="margin-top:0">
+      <button onclick="send('start')">▶ Démarrer</button>
+      <button class="ko" onclick="send('stop')">■ Arrêter</button>
+      <button class="gr" onclick="send('screenshot')">📸 Capture</button>
+      <button class="gr" onclick="if(confirm('Remettre le compteur à 0 ?'))send('reset_counter')">Compteur à 0</button>
+    </div>
+    <div class="lbl" style="margin-top:14px">Réglages</div>
+    <div class="row">
+      <label>Toutes les <input id="interval" type="number" min="1"> min</label>
+      <label>± <input id="jitter" type="number" min="0"> min</label>
+      <label>Max <input id="maxruns" type="number" min="0"> (0 = illimité)</label>
+      <label><input id="runnow" type="checkbox"> lancer tout de suite</label>
+      <button class="gr" onclick="saveCfg()">Enregistrer</button>
+    </div>
+    <div class="row"><select id="recs" style="min-width:260px"></select>
+      <button class="gr" onclick="selRec()">Utiliser ce fichier</button>
+      <span class="mut">Actif : <b id="current">-</b></span></div>
+  </div>
+
+  <div class="card">
+    <div class="lbl">Terminal à distance</div>
+    <div class="row">
+      <button class="ko" onclick="if(confirm('Redémarrer le Pi ?'))send('reboot')">Redémarrer le Pi</button>
+      <button class="ko" onclick="if(confirm('Éteindre le Pi ? Il faudra le rallumer à la main.'))send('shutdown')">Éteindre</button>
+      <button class="gr" onclick="send('restart_service')">Relancer le script</button>
+      <button class="gr" onclick="sh('uptime && vcgencmd measure_temp')">Uptime / température</button>
+      <button class="gr" onclick="sh('df -h /')">Disque</button>
+      <button class="gr" onclick="sh('tail -n 30 ~/macro/server.log')">Logs</button>
+    </div>
+    <div class="row"><input id="cmdline" placeholder="commande shell (ex : ls ~/macro)" onkeydown="if(event.key==='Enter')sh($('cmdline').value)">
+      <button onclick="sh($('cmdline').value)">Envoyer</button></div>
+    <div id="cmds"></div>
+  </div>
+
+  <div class="card"><div class="lbl">Galerie (<span id="count">0</span>)</div><div class="gal" id="gal"></div></div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.js"></script>
+<script>
+const SB=supabase.createClient("https://vrwlojpxhdrrrxtvksat.supabase.co","sb_publishable_HVrUOJuwyOj1OoFYejTIZQ_KUXeRfTy");
+const $=i=>document.getElementById(i);
+const esc=s=>String(s??"").replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+let timer=null,nextRun=null,galKey="",cfgLoaded=false;
+const fmt=s=>{s=Math.max(0,Math.floor(s));const h=Math.floor(s/3600),m=Math.floor(s%3600/60);return(h?h+"h ":"")+String(m).padStart(2,"0")+"m "+String(s%60).padStart(2,"0")+"s"};
+
+async function login(){const{error}=await SB.auth.signInWithPassword({email:$("em").value,password:$("pw").value});
+  if(error)$("lerr").textContent=error.message;else show(true)}
+async function logout(){await SB.auth.signOut();show(false)}
+function show(on){$("login").hidden=on;$("app").hidden=!on;
+  if(on&&!timer){refresh();timer=setInterval(refresh,3000);setInterval(tick,1000)}
+  if(!on&&timer){clearInterval(timer);timer=null}}
+
+async function send(type,payload={}){
+  const{error}=await SB.from("commands").insert({type,payload});
+  if(error)alert(error.message);else refresh()}
+const sh=cmd=>{cmd=(cmd||"").trim();if(cmd){send("shell",{cmd});$("cmdline").value=""}};
+const saveCfg=()=>send("save_config",{interval_min:+$("interval").value,jitter_min:+$("jitter").value,max_runs:+$("maxruns").value,run_now:$("runnow").checked});
+const selRec=()=>$("recs").value&&send("select_recording",{name:$("recs").value});
+
+async function refresh(){
+  const{data:s,error}=await SB.from("device_state").select("*").single();
+  if(error){$("status").textContent="Accès refusé";return}
+  const online=s.heartbeat&&Date.now()-Date.parse(s.heartbeat)<40000;
+  $("dot").className="dot"+(online?" on":"");$("host").textContent=online?"en ligne":"hors-ligne";
+  $("status").textContent=s.playing?"▶ Lecture":(s.running?"⏳ En attente":"⏹ Arrêté");
+  $("runs").textContent=s.runs;nextRun=s.next_run?Date.parse(s.next_run):null;
+  $("last").textContent=s.last_run?new Date(s.last_run).toLocaleString():"-";
+  const i=s.info||{};$("pi").innerHTML=[i.ip,i.cpu_temp!=null?i.cpu_temp+" °C":"",i.uptime_s!=null?"allumé depuis "+fmt(i.uptime_s):""].filter(Boolean).map(esc).join("<br>")||"-";
+  $("current").textContent=s.config.recording;
+  if(!cfgLoaded){$("interval").value=s.config.interval_min;$("jitter").value=s.config.jitter_min;$("maxruns").value=s.config.max_runs;$("runnow").checked=s.config.run_now;cfgLoaded=true}
+  $("recs").innerHTML=(s.recordings||[]).map(r=>`<option value="${esc(r.name)}"${r.name===s.config.recording?" selected":""}>${esc(r.name)} — ${r.events} évènements, ${Math.round(r.duration)} s</option>`).join("")||"<option value=''>Aucun fichier</option>";
+  const{data:c}=await SB.from("commands").select("*").order("id",{ascending:false}).limit(12);
+  $("cmds").innerHTML=(c||[]).map(x=>`<div class="cmd"><b>${esc(x.type)}</b> ${esc(x.payload?.cmd||"")} <span class="st-${x.status}">${x.status}</span> <span class="mut">${new Date(x.created_at).toLocaleTimeString()}</span>${x.output?`<pre>${esc(x.output)}</pre>`:""}</div>`).join("");
+  const{data:g}=await SB.from("screenshots").select("*").order("id",{ascending:false}).limit(60);
+  const key=(g||[]).map(x=>x.id).join();
+  if(key!==galKey&&g){galKey=key;$("count").textContent=g.length;
+    const{data:u}=await SB.storage.from("screenshots").createSignedUrls(g.map(x=>x.path),3600);
+    const url=Object.fromEntries((u||[]).map(x=>[x.path,x.signedUrl]));
+    $("gal").innerHTML=g.map(x=>`<div><a href="${url[x.path]||"#"}" target="_blank"><img loading="lazy" src="${url[x.path]||""}"></a><div class="mut">#${x.run??"-"} · ${new Date(x.created_at).toLocaleString()}</div></div>`).join("")}
+}
+function tick(){$("next").textContent=nextRun?fmt((nextRun-Date.now())/1000):"-"}
+SB.auth.getSession().then(({data})=>show(!!data.session));
+</script></body></html>
