@@ -64,7 +64,7 @@ pre{background:#0a0d1a;padding:8px;border-radius:8px;overflow:auto;max-height:20
     <div class="lbl">Terminaux (sessions persistantes)</div>
     <div class="row" id="tabs"></div>
     <div id="term" style="margin-top:10px;height:420px;background:#000;border-radius:8px;padding:6px"></div>
-    <div class="mut" style="margin-top:6px">Chaque terminal garde son dossier, ses variables et ses programmes en cours (htop, nano, Ctrl+C fonctionnent). Latence d’environ 1 s.</div>
+    <div class="mut" style="margin-top:6px">Chaque terminal garde son dossier, ses variables et ses programmes en cours. En mode ligne, ce que tu tapes s’affiche tout de suite et part à Entrée. Passe en mode direct pour nano, htop ou un mot de passe (sudo).</div>
   </div>
 
   <div class="card">
@@ -133,6 +133,25 @@ async function refresh(){
 }
 // ---------- terminaux multiples ----------
 const terms={};let tsessions=[],curTerm=null,inBuf={},inTimer=null,inQ=Promise.resolve(),outTimer=null,polling=false;
+let lineMode=true;const lbuf={};
+const erase=n=>"\b \b".repeat(n);
+function sendNow(id,text){if(text)inQ=inQ.then(()=>SB.from("shell_io").insert({session_id:id,kind:"in",data:text}))}
+function flushLine(id){const b=lbuf[id]||"";if(b){terms[id].term.write(erase([...b].length));sendNow(id,b);lbuf[id]=""}}
+function toggleMode(){if(curTerm)flushLine(curTerm);lineMode=!lineMode;renderTabs();if(curTerm)terms[curTerm].term.focus()}
+// Mode ligne : ce que tu tapes s’affiche tout de suite (écho local) et n’est envoyé au Pi qu’à Entrée.
+function handleData(id,d){
+  const t=terms[id].term;
+  if(!lineMode){inBuf[id]=(inBuf[id]||"")+d;clearTimeout(inTimer);inTimer=setTimeout(flushIn,30);return}
+  if(d.startsWith("\x1b")){flushLine(id);sendNow(id,d);return}
+  for(const ch of d){
+    const b=lbuf[id]||"";
+    if(ch==="\r"){t.write(erase([...b].length));lbuf[id]="";sendNow(id,b+"\r")}
+    else if(ch==="\x7f"){if(b){const a=[...b];a.pop();lbuf[id]=a.join("");t.write("\b \b")}else sendNow(id,ch)}
+    else if(ch==="\x03"){t.write(erase([...b].length));lbuf[id]="";sendNow(id,ch)}
+    else if(ch<" "){flushLine(id);sendNow(id,ch)}
+    else{lbuf[id]=b+ch;t.write(ch)}
+  }
+}
 async function loadSessions(){
   const{data}=await SB.from("shell_sessions").select("*").eq("status","open").order("created_at");
   tsessions=data||[];
@@ -141,7 +160,8 @@ async function loadSessions(){
   if(!curTerm&&tsessions[0])openTab(tsessions[0].id);else renderTabs()}
 function renderTabs(){
   $("tabs").innerHTML=tsessions.map(s=>`<button class="${s.id===curTerm?"":"gr"}" onclick="openTab('${s.id}')">${esc(s.name)}</button>`).join("")
-   +`<button class="gr" onclick="newShell()">+ Nouveau</button>`+(curTerm?`<button class="ko" onclick="closeShell()">✕ Fermer</button>`:"")}
+   +`<button class="gr" onclick="newShell()">+ Nouveau</button>`+(curTerm?`<button class="ko" onclick="closeShell()">✕ Fermer</button>`:"")
+   +`<button class="gr" style="margin-left:auto" onclick="toggleMode()">${lineMode?"Mode : ligne (envoi à Entrée)":"Mode : direct"}</button>`}
 function disposeTerm(id){const t=terms[id];if(t){t.term.dispose();t.el.remove();delete terms[id]}}
 async function newShell(){
   const n=Math.max(0,...tsessions.map(s=>parseInt(s.name.replace(/\D/g,""))||0))+1;
@@ -162,7 +182,8 @@ function openTab(id){
     const term=new Terminal({cursorBlink:true,fontSize:14,theme:{background:"#000000"}});
     const fit=new FitAddon.FitAddon();term.loadAddon(fit);term.open(el);
     terms[id]={term,fit,el,last:0};
-    term.onData(d=>{inBuf[id]=(inBuf[id]||"")+d;clearTimeout(inTimer);inTimer=setTimeout(flushIn,30)});
+    term.write("\x1b[?45h");  // permet d’effacer une ligne qui passe à la ligne suivante
+    term.onData(d=>handleData(id,d));
     term.onResize(()=>sendResize(id));
     setTimeout(()=>{fit.fit();sendResize(id)},2500);
   }
