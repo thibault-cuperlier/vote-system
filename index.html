@@ -2,6 +2,7 @@
 <html lang="fr"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Pi Macro</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.css">
 <style>
 :root{--bg:#0f1220;--card:#181c30;--in:#232846;--txt:#e8eaf6;--mut:#8a90b4;--acc:#6c8cff;--ok:#3ddc97;--ko:#ff5d73}
 *{box-sizing:border-box}body{margin:0;font-family:system-ui,sans-serif;background:var(--bg);color:var(--txt);padding:16px;max-width:1100px;margin:auto}
@@ -60,7 +61,14 @@ pre{background:#0a0d1a;padding:8px;border-radius:8px;overflow:auto;max-height:20
   </div>
 
   <div class="card">
-    <div class="lbl">Terminal à distance</div>
+    <div class="lbl">Terminaux (sessions persistantes)</div>
+    <div class="row" id="tabs"></div>
+    <div id="term" style="margin-top:10px;height:420px;background:#000;border-radius:8px;padding:6px"></div>
+    <div class="mut" style="margin-top:6px">Chaque terminal garde son dossier, ses variables et ses programmes en cours (htop, nano, Ctrl+C fonctionnent). Latence d’environ 1 s.</div>
+  </div>
+
+  <div class="card">
+    <div class="lbl">Actions rapides</div>
     <div class="row">
       <button class="ko" onclick="if(confirm('Redémarrer le Pi ?'))send('reboot')">Redémarrer le Pi</button>
       <button class="ko" onclick="if(confirm('Éteindre le Pi ? Il faudra le rallumer à la main.'))send('shutdown')">Éteindre</button>
@@ -78,6 +86,8 @@ pre{background:#0a0d1a;padding:8px;border-radius:8px;overflow:auto;max-height:20
 </div>
 
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.js"></script>
 <script>
 const SB=supabase.createClient("https://vrwlojpxhdrrrxtvksat.supabase.co","sb_publishable_HVrUOJuwyOj1OoFYejTIZQ_KUXeRfTy");
 const $=i=>document.getElementById(i);
@@ -111,6 +121,7 @@ async function refresh(){
   $("current").textContent=s.config.recording;
   if(!cfgLoaded){$("interval").value=s.config.interval_min;$("jitter").value=s.config.jitter_min;$("maxruns").value=s.config.max_runs;$("runnow").checked=s.config.run_now;cfgLoaded=true}
   $("recs").innerHTML=(s.recordings||[]).map(r=>`<option value="${esc(r.name)}"${r.name===s.config.recording?" selected":""}>${esc(r.name)} — ${r.events} évènements, ${Math.round(r.duration)} s</option>`).join("")||"<option value=''>Aucun fichier</option>";
+  loadSessions();
   const{data:c}=await SB.from("commands").select("*").order("id",{ascending:false}).limit(12);
   $("cmds").innerHTML=(c||[]).map(x=>`<div class="cmd"><b>${esc(x.type)}</b> ${esc(x.payload?.cmd||"")} <span class="st-${x.status}">${x.status}</span> <span class="mut">${new Date(x.created_at).toLocaleTimeString()}</span>${x.output?`<pre>${esc(x.output)}</pre>`:""}</div>`).join("");
   const{data:g}=await SB.from("screenshots").select("*").order("id",{ascending:false}).limit(60);
@@ -120,6 +131,52 @@ async function refresh(){
     const url=Object.fromEntries((u||[]).map(x=>[x.path,x.signedUrl]));
     $("gal").innerHTML=g.map(x=>`<div><a href="${url[x.path]||"#"}" target="_blank"><img loading="lazy" src="${url[x.path]||""}"></a><div class="mut">#${x.run??"-"} · ${new Date(x.created_at).toLocaleString()}</div></div>`).join("")}
 }
+// ---------- terminaux multiples ----------
+const terms={};let tsessions=[],curTerm=null,inBuf={},inTimer=null,inQ=Promise.resolve(),outTimer=null,polling=false;
+async function loadSessions(){
+  const{data}=await SB.from("shell_sessions").select("*").eq("status","open").order("created_at");
+  tsessions=data||[];
+  for(const k in terms)if(!tsessions.find(s=>s.id===k))disposeTerm(k);
+  if(curTerm&&!terms[curTerm])curTerm=null;
+  if(!curTerm&&tsessions[0])openTab(tsessions[0].id);else renderTabs()}
+function renderTabs(){
+  $("tabs").innerHTML=tsessions.map(s=>`<button class="${s.id===curTerm?"":"gr"}" onclick="openTab('${s.id}')">${esc(s.name)}</button>`).join("")
+   +`<button class="gr" onclick="newShell()">+ Nouveau</button>`+(curTerm?`<button class="ko" onclick="closeShell()">✕ Fermer</button>`:"")}
+function disposeTerm(id){const t=terms[id];if(t){t.term.dispose();t.el.remove();delete terms[id]}}
+async function newShell(){
+  const n=Math.max(0,...tsessions.map(s=>parseInt(s.name.replace(/\D/g,""))||0))+1;
+  const{data,error}=await SB.from("shell_sessions").insert({name:"Shell "+n}).select().single();
+  if(error)return alert(error.message);
+  tsessions.push(data);openTab(data.id)}
+async function closeShell(){
+  if(!curTerm||!confirm("Fermer ce terminal ? Les programmes qui tournent dedans seront arrêtés."))return;
+  const id=curTerm;await SB.from("shell_sessions").update({status:"closed"}).eq("id",id);
+  disposeTerm(id);tsessions=tsessions.filter(s=>s.id!==id);curTerm=null;
+  if(tsessions[0])openTab(tsessions[0].id);else renderTabs()}
+const sendResize=id=>{const t=terms[id];if(t)SB.from("shell_io").insert({session_id:id,kind:"resize",data:t.term.cols+","+t.term.rows})};
+function openTab(id){
+  curTerm=id;renderTabs();
+  for(const k in terms)terms[k].el.style.display=k===id?"block":"none";
+  if(!terms[id]){
+    const el=document.createElement("div");el.style.height="100%";$("term").appendChild(el);
+    const term=new Terminal({cursorBlink:true,fontSize:14,theme:{background:"#000000"}});
+    const fit=new FitAddon.FitAddon();term.loadAddon(fit);term.open(el);
+    terms[id]={term,fit,el,last:0};
+    term.onData(d=>{inBuf[id]=(inBuf[id]||"")+d;clearTimeout(inTimer);inTimer=setTimeout(flushIn,30)});
+    term.onResize(()=>sendResize(id));
+    setTimeout(()=>{fit.fit();sendResize(id)},2500);
+  }
+  const t=terms[id];t.fit.fit();t.term.focus();
+  if(!outTimer)outTimer=setInterval(pollOut,600);
+  pollOut()}
+function flushIn(){const b=inBuf;inBuf={};for(const id in b)inQ=inQ.then(()=>SB.from("shell_io").insert({session_id:id,kind:"in",data:b[id]}))}
+async function pollOut(){
+  if(polling||!curTerm||!terms[curTerm])return;polling=true;
+  const id=curTerm,t=terms[id];
+  try{const{data}=await SB.from("shell_io").select("id,data").eq("session_id",id).eq("kind","out").gt("id",t.last).order("id").limit(500);
+    if(data&&data.length){t.last=data[data.length-1].id;t.term.write(data.map(x=>x.data).join(""))}}
+  finally{polling=false}}
+addEventListener("resize",()=>curTerm&&terms[curTerm]&&terms[curTerm].fit.fit());
 function tick(){$("next").textContent=nextRun?fmt((nextRun-Date.now())/1000):"-"}
 SB.auth.getSession().then(({data})=>show(!!data.session));
 </script></body></html>
